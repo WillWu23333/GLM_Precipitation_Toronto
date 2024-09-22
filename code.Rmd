@@ -1,0 +1,509 @@
+---
+title: "Untitled"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-04-03"
+---
+
+```{r, echo=FALSE, message=FALSE}
+suppressWarnings(suppressMessages({
+  # install.packages("knitr") # install the knitr package
+  library(knitr) # load the knitr package
+  
+  library(dplyr)
+  library(tidyr)
+  library(caret)
+  # 'gridExtra': arrangee the plots in 2x2 layout 
+  
+  # install.packages('gridExtra')
+  library(gridExtra)
+  
+  # install.packages('corrplot')
+  # library(corrplot)
+  # remove.packages("ggplot2") # Unisntall ggplot
+  
+  # install.packages("ggplot2") # Install it again
+  library(ggplot2) # Load the librarie (you have to do this one on each new session)
+  
+  # install.packages("glmnet")
+  library(glmnet)
+  
+  # install.packages('car')
+  library(car)
+  
+  library(pROC)
+  
+  # install.packages('faraway')
+  library(faraway)
+}))
+```
+
+```{r}
+set.seed(1007217101)
+```
+
+
+## Load Data
+
+```{r,echo=F}
+
+dt0 <- read.csv("toronto.csv", header = TRUE)
+
+# 1. Scan 'date_time' column, drop data from year 2008
+dt0 = dt0 %>% filter(!grepl("2008", date_time))
+# dt0 <- subset(dt0, !grepl("2008", dt0$date_time))
+
+
+## Generate Y variable 'rained'
+dt0$precipMM <- as.numeric(dt0$precipMM) # justincase 'precipMM' is not formatted as numeric
+dt0$rained <- ifelse(dt0$precipMM > 0, 1, 0)
+
+
+## Generate cat. variable 'snowed'
+dt0$totalSnow_cm <- as.numeric(dt0$totalSnow_cm) # justincase not numeric
+dt0$snowed <- ifelse(dt0$totalSnow_cm > 0, 1, 0)
+
+
+## Generate  cat. variable 'season' --> further, generate indicator whether it is winter
+
+# Ensure correct Date format
+dt0$date_time <- as.Date(dt0$date_time)
+# convert  to month number
+dt0$month <- as.numeric(format(dt0$date_time, "%m"))
+# assign seasons based on the month
+dt0$season <- cut(dt0$month, breaks=c(0, 3, 5, 8, 11, 12), labels=c("winter", "spring", "summer", "fall", "winter"), include.lowest=TRUE)
+# Createbinary variable 'is_winter'
+dt0$is_winter <- ifelse(dt0$season == 'winter', 1, 0)
+
+
+
+## Generate 'medTempC'
+dt0$medTempC <- apply(dt0[,c('maxtempC', 'mintempC')], 1, median)
+
+
+dt0 <- na.omit(dt0)
+```
+
+```{r,echo=F,include=F}
+write.csv(dt0,"Toronto_clean.csv")
+```
+
+```{r}
+dt <- read.csv("Toronto_clean.csv", header = TRUE)
+dt <- subset(dt, select = -X)
+dt$rained <- as.factor(dt$rained)
+dt$snowed <- as.factor(dt $snowed)
+dt$is_winter <- as.factor(dt $is_winter)
+
+dt %>% glimpse()
+dt %>% colnames()
+dt %>% head(10) # 4048 rows * 31 cols
+```
+
+## Mutates
+
+```{r}
+dt <- dt %>% mutate(log_visibility = log(visibilityKM))
+# p<-ggplot(as_tibble(dt), aes(x=log_visibility, fill=rained)) +
+#       geom_histogram(position="dodge", binwidth=1) +
+#       labs(x="Visibility (km)", y="Count of Rainy Days")
+# p
+```
+
+
+## Split Data Train Test 8:2.  But this step is not necessary in this study as we will be using lrm() to validate, which automatically conducts k-fold cross-validation. At this stage, we would just define variable spaces.
+
+
+```{r}
+# train_indexes <- sample(1:nrow(dt), size = 0.8 * nrow(dt)) # 80% for training
+# dt_train <- dt[train_indexes, ]
+# dt_test <- dt[-train_indexes, ]
+# 
+# # dt_train %>% glimpse() #3238
+# # dt_test %>% glimpse() #810
+
+
+
+full_predictors <- c('medTempC' , "humidity",
+                      'cloudcover', 'windspeedKmph' , 'log_visibility' , 'pressure' , 
+                      'DewPointC' , 'sunHour' , 'uvIndex' , 'WindGustKmph' ,
+                      'winddirDegree' ,'moon_illumination_percent' ,'FeelsLikeC')
+# full_predictors <- c(full_predictors,'rained')
+full_predictors
+# dt['rained'] is the response variable.
+
+```
+
+## Correlation Matrix to first select candidate featrues (Not included)
+
+```{r}
+# numer = c('medTempC' , "humidity" , 
+#                       'cloudcover', 'windspeedKmph' , 'visibilityKM' , 'pressure' , 
+#                       'DewPointC' , 'sunHour' , 'uvIndex' , 'WindGustKmph' ,
+#                       'winddirDegree' ,'moon_illumination_percent' ,'FeelsLikeC')
+# 
+# cmatrix <- cor(dt[numer])
+# dt[numer]
+# #col <- colorRampPalette(c())
+# corrplot(cmatrix,addCoef.col="grey",number.cex=0.5,tl.cex=0.6)
+```
+
+## Full model)
+
+```{r}
+model1 <- glm(rained ~ .,
+              family = binomial(link = logit), 
+              data = dt[c(full_predictors,'rained')])
+
+model1 %>% summary()
+```
+
+
+## Perform AIC based stepwise selection 
+
+```{r, eval=TRUE, echo = T}
+## Stepwise elimination based on AIC ##
+sel.var.aic <- step(model1, trace = 0, k = 2, direction = "both") 
+select_var_aic<-attr(terms(sel.var.aic), "term.labels")   
+select_var_aic
+```
+
+
+## Now perform BIC based selection
+
+```{r, eval=TRUE, echo = T}
+## Stepwise elimination based on AIC ##
+sel.var.bic <- step(model1, trace = 0, k = log(nrow(dt)), direction = "both") 
+select_var_bic<-attr(terms(sel.var.bic), "term.labels")   
+select_var_bic
+```
+
+
+## Lasso Selection
+
+Similar process: first we fit model with differnt lambdas
+
+```{r}
+X <- as.matrix(dt[full_predictors])
+Y <-dt$rained
+
+# grid = 10^seq(10,-2,length = 100)
+
+cv.out <- cv.glmnet(X,Y,alpha=1, family= 'binomial') # 10 fold cross validation
+bestlam <- cv.out$lambda.min
+bestlam
+
+
+#Then we look at the best model i.e. who has the least lambda. And extract its variables.
+
+
+lasso.mod <- glmnet(X,Y,alpha=1,lambda=bestlam,family= 'binomial') #get the model under the best lambda value
+coefs <-coef(lasso.mod)[,1]
+coefs<-coefs[coefs != 0]
+a <-coefs %>% as.data.frame()
+select_var_lasso =a %>% rownames()
+select_var_lasso=select_var_lasso[!select_var_lasso %in% c("(Intercept)")] 
+select_var_lasso
+```
+
+### A Helper Function for df beta:
+
+```{r}
+
+Draw_dfbetas <- function(Features, y='rained'){
+  modeltemp <- glm(rained ~ .,
+              family = binomial(link = logit), data = dt[Features]) 
+  # modeltemp %>% summary
+  df.final <- dfbetas(modeltemp)
+  
+  for (feature in Features[!Features %in% 'rained']) {
+    
+    # df.final %>% head
+    
+    par(family = 'serif')
+    plot(dt[,feature], df.final[,feature], xlab=feature, 
+         ylab='dfbeta')
+    lines(lowess(dt[,feature], df.final[,feature] ), lwd=2, col='blue')
+    abline(h=0, lty='dotted')
+    abline(h=-2/sqrt(nrow(df.final)), lty='dotted')
+    abline(h=2/sqrt(nrow(df.final)), lty='dotted')
+  }
+}
+
+# Draw_dfbetas(Features = candidates_6)
+```
+
+
+### Helper Function for Deviance residuals
+```{r, eval=TRUE, echo = T}
+
+# ## Plot the deviance residuals ##
+# res.dev <- residuals(model2, type = "deviance")
+# par(family = 'serif')
+# plot(dt[,'WindGustKmph'], res.dev, xlab='WindGustKmph', 
+#      ylab='Deviance Residuals')
+# lines(lowess(dt[,'WindGustKmph'], res.dev), lwd=2, col='blue')
+# abline(h=0, lty='dotted')
+# 
+
+
+
+Draw_devianceResidual <- function(Features, y='rained'){
+  modeltemp <- glm(rained ~ .,
+              family = binomial(link = logit), data = dt[Features]) 
+  # modeltemp %>% summary
+  df.final <- dfbetas(modeltemp)
+  
+  for (feature in Features[!Features %in% 'rained']) {
+    
+    res.dev <- residuals(modeltemp, type = "deviance")
+    par(family = 'serif')
+    plot(dt[,feature], res.dev, xlab=feature, 
+         ylab='Deviance Residuals')
+    lines(lowess(dt[,feature], res.dev), lwd=2, col='blue')
+    abline(h=0, lty='dotted')
+  }
+}
+# Draw_devianceResidual(candidates_6)
+```
+
+
+
+
+
+
+## Define Variable Space for the final model
+
+
+```{r}
+candidates_ab <- intersect(select_var_aic, select_var_bic)
+candidates_abl <- intersect(candidates_ab, select_var_lasso)
+candidates_bl <- intersect(select_var_bic, select_var_lasso)
+
+candidates_1 <- candidates_abl[!candidates_abl %in% c('uvIndex','WindGustKmph')]
+candidates_1 = c(candidates_1,'humidity' )
+
+candidates_2 = candidates_1 = c(candidates_1,'is_winter','snowed' )
+candidates_2 <- candidates_2[!candidates_2 %in% c('windspeedKmph','snowed')]
+# dt$windspeedKmph
+# candidates_2 <- sel.var.b2[!sel.var.b2 %in% c('WindGustKmph')]
+# candidates_2 = c(candidates_2,'humidity' )
+
+# 'WindGustKmph','uvIndex'
+# # candidates_6 = c(candidates_4,'log_visibility' )
+# # candidates_6= candidates_6[!candidates_6 %in% c("visibilityKM")]
+# 
+# candidates_7 = c(full_predictors,'rained','log_visibility')
+# candidates_7 = candidates_7[!candidates_7 %in% c('FeelsLikeC',"DewPointC",'moon_illumination_percent','WindGustKmph','visibilityKM')]
+
+```
+
+
+
+## Plot the dfbetas and deviance residuals
+
+
+### Fit the initial final model, and plot deviance betas 
+
+```{r}
+
+ft = candidates_2
+ftr = c(ft,'rained')
+
+modelF <- glm(rained ~ .,family = binomial(link = logit), data = dt[ftr])
+# Draw_dfbetas(Features = ftr)
+# Draw_devianceResidual(ftr)
+
+modelF %>% summary()
+modelF%>% vif()
+```
+
+
+
+## Check and remove outliers
+
+```{r}
+
+
+# Extract linear predictors (eta)
+eta <- predict(modelF, type = "link")
+
+# Calculate standardized residuals
+residuals_standardized <- rstandard(modelF)
+
+# Create QQ plot
+qqnorm(residuals_standardized)
+qqline(residuals_standardized, col = "red")
+
+######
+plot(eta, resid(modelF, type = "deviance"),
+     xlab = "Linear Predictor", ylab = "Deviance Residuals", main = "")
+
+# Deviance Residuals vs. Fitted Values
+plot(fitted(modelF), resid(modelF, type = "deviance"),
+     xlab = "Fitted Values", ylab = "Deviance Residuals", main = "")
+
+#identify potential outliers with absolute standardized residuals greater than 2
+potential_outliers <- which(abs(residuals_standardized) > 2)
+
+#Find  potential outliers
+outlier_data <- modelF$data[potential_outliers, ]
+outlier_data
+
+#Remove them:
+dt2 <- modelF$data[-potential_outliers, ]
+
+```
+
+## Fit again, as the final Model:
+
+```{r}
+ft = candidates_2
+ftr = c(ft,'rained')
+ftr
+modelFF <- glm(rained ~ .,family = binomial(link = logit), data = dt2[ftr])
+modelFF %>% summary()
+modelFF%>% vif()
+
+```
+
+
+
+## Model calibration with cross-validation and bootstrap. 
+
+### Plus the QQ-Plot and Deviance Residual plot, which will be cobined to display in the report.
+
+```{r, eval=TRUE, echo = T,fig.height=8,fig.width=9 }
+library(rms)
+
+par(mfrow = c(2,2))
+
+## Fit the model with lrm from rms package ##
+lrm.final <- lrm(rained ~ ., data = dt2[ftr], x =TRUE, y = TRUE, model= T)
+# cross.calib <- calibrate(lrm.final, method="crossvalidation", B=10) # model calibration
+cross.calib <- calibrate(lrm.final, method="crossvalidation", B=10) # model calibration
+plot(cross.calib, las=1, xlab = "Predicted Probability")
+
+## Discrimination with ROC curve 
+
+# library(pROC)
+p <- predict(lrm.final, type = "fitted")
+
+roc_logit <- roc(dt2$rained ~ p)
+## The True Positive Rate ##
+TPR <- roc_logit$sensitivities
+## The False Positive Rate ##
+FPR <- 1 - roc_logit$specificities
+
+plot(FPR, TPR, xlim = c(0,1), ylim = c(0,1), type = 'l', lty = 1, lwd = 2,col = 'red')
+abline(a = 0, b = 1, lty = 2, col = 'blue')
+text(cex = 1.2,0.5,0.5,label = paste("AUC = ", round(auc(roc_logit),2)))
+
+auc(roc_logit)
+qqnorm(residuals_standardized)
+qqline(residuals_standardized, col = "red")
+
+# Deviance Residuals vs. Fitted Values
+plot(fitted(modelF), resid(modelF, type = "deviance"),
+     xlab = "Fitted Values", ylab = "Deviance Residuals", main = "")
+```
+
+
+## Generate summary table for final data. Exported and pasted into report document.
+
+
+```{r}
+# install.packages("psych") 
+library(psych)
+
+
+# write.csv(describe(dt2), file = "summary_table.csv", row.names = T)
+
+mean(dt2$is_winter==1)
+# modelFF$coefficients
+```
+## Summary table for all candidate models
+
+```{r}
+suppressWarnings(suppressMessages({
+  modelA<-glm(rained ~ .,family = binomial(link = logit), data = dt[c(select_var_aic,'rained')])
+  modelB<-glm(rained ~ .,family = binomial(link = logit), data = dt[c(select_var_bic,'rained')])
+  modelL<-glm(rained ~ .,family = binomial(link = logit), data = dt[c(select_var_lasso,'rained')])
+  
+  # modelsn <- glm(rained ~ .,family = binomial(link = logit), data = dt[c(candidates_2,'rained')])
+  
+  # install.packages('stargazer')
+  library(stargazer)
+  
+  stargazer(modelFF, modelA, modelB, modelL, type='text', digits = 4, title = 'Table 2: Summary of All Candidate Models', style = 'qje', column.labels = c('Final Model', 'AIC Selected', 'BIC Selected', 'Lasso Selected'), dep.var.labels = 'Models')
+}))
+```
+
+## The following are EDA plots, which will be displayed in appendix of the report.
+
+```{r}
+suppressWarnings(suppressMessages({
+
+p1 <- ggplot(as_tibble(dt2), aes(x=medTempC, fill=rained)) +
+      geom_histogram(position="dodge", binwidth=2) +
+      labs(x="Median Temperature (C)", y="Count of Rainy Days")
+
+p2 <- ggplot(as_tibble(dt2), aes(x=humidity, fill=rained)) +
+      geom_histogram(position="dodge", binwidth=2) +
+      labs(x="Humidity Level (%)", y="Count of Rainy Days")
+
+p3 <- ggplot(as_tibble(dt2), aes(x=pressure, fill=rained)) +
+      geom_histogram(position="dodge", binwidth=2) +
+      labs(x="Pressure", y="Count of Rainy Days")
+
+p4 <- ggplot(as_tibble(dt2), aes(x=log_visibility, fill=rained)) +
+      geom_histogram(position="dodge", binwidth=2) +
+      labs(x="Logged Visibility", y="Count of Rainy Days")
+
+p5 <- ggplot(as_tibble(dt2), aes(x=cloudcover , fill=rained)) +
+      geom_histogram(position="dodge", binwidth=1) +
+      labs(x="Cloud coverage rate", y="Count of Rainy Days")
+
+bar1 <- ggplot(dt2, aes(x=rained, fill=is_winter)) +
+    geom_bar(position="dodge", binwidth=5)+ 
+    labs(x="Rained", y="Count of Days", fill="Winter")
+
+grid.arrange(p1, p2, p3, p4, p5, bar1, nrow=2)
+}))
+```
+### Boxplots for numeric variables
+```{r, echo=FALSE}
+suppressWarnings(suppressMessages({
+
+  pb1 <- ggplot(as_tibble(dt2), aes(x=rained, y=medTempC)) +
+        geom_boxplot() +
+        labs(x="Rain Occurrence", y="Median Temperature (C)")
+  
+  pb2 <- ggplot(as_tibble(dt2), aes(x=rained, y=humidity)) +
+        geom_boxplot() +
+        labs(x="Rain Occurrence", y="Humidity Level (%)")
+  
+  pb3 <- ggplot(as_tibble(dt2), aes(x=rained, y=pressure)) +
+        geom_boxplot() +
+        labs(x="Rain Occurrence", y="Pressure (mb)")
+
+  pb4 <- ggplot(as_tibble(dt2), aes(x=rained, y=log_visibility)) +
+        geom_boxplot() +
+        labs(x="Rain Occurrence", y="Logged Visibility (Km)")  
+  pb5 <- ggplot(as_tibble(dt2), aes(x=rained, y=cloudcover)) +
+        geom_boxplot() +
+        labs(x="Rain Occurrence", y="Cloud Cover (%)")
+  
+
+  
+  
+  grid.arrange(pb1, pb2, pb3, pb4, pb5, nrow=2)
+
+}))
+```
+```{r}
+# grid.arrange(p1, p2, p3, p4, p5, bar1, 
+#              pb1, pb2, pb3, pb4, pb5, nrow=2)
+```
+
